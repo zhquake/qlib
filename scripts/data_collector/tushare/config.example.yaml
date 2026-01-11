@@ -1,0 +1,37 @@
+# Tushare 自动更新服务配置文件
+
+# Tushare API Token（必需）
+token: "YOUR_TUSHARE_TOKEN"
+
+# 数据目录
+csv_data_dir: "~/.qlib/tushare_data/cn_data"
+qlib_data_dir: "~/.qlib/qlib_data/cn_data"
+
+# 时间粒度: 1d(日线), 1min(分钟线)
+interval: "1d"
+
+# 并发设置
+max_workers: 4
+
+# 重试设置
+max_retries: 3
+retry_delay: 300  # 秒
+
+# 日志目录（可选）
+log_dir: "~/.qlib/logs"
+
+# 通知设置（可选）
+enable_notification: false
+notification_config:
+  # 企业微信机器人
+  wecom_webhook: ""
+  # 钉钉机器人
+  dingtalk_webhook: ""
+  # 邮件通知
+  email:
+    smtp_server: "smtp.example.com"
+    smtp_port: 587
+    sender: "sender@example.com"
+    password: "password"
+    receivers:
+      - "receiver@example.com"

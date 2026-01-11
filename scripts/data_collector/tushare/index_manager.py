@@ -37,10 +37,16 @@ class IndexManager:
         'csi300': '000300.SH',     # 沪深300
         'hs500': '000905.SH',      # 中证500
         'csi500': '000905.SH',     # 中证500
+        'zz500': '000905.SH',      # 中证500
         'hs100': '000903.SH',      # 中证100
         'csi100': '000903.SH',     # 中证100
         'sz50': '000016.SH',       # 上证50
-        'zz500': '000905.SH',      # 中证500
+        'sh50': '000016.SH',       # 上证50
+        'zz1000': '000852.SH',     # 中证1000
+        'csi1000': '000852.SH',    # 中证1000
+        'cybz': '399006.SZ',       # 创业板指
+        'cyb': '399006.SZ',        # 创业板指
+        'kc50': '000688.SH',       # 科创50
     }
     
     def __init__(self, token: str):
@@ -107,7 +113,8 @@ class IndexManager:
             logger.error(f"获取指数列表失败: {e}")
             raise
     
-    def get_index_constituents(self, index_code: str, output_file: Optional[str] = None) -> List[str]:
+    def get_index_constituents(self, index_code: str, output_file: Optional[str] = None, 
+                              trade_date: Optional[str] = None) -> List[str]:
         """
         获取指定指数的成分股列表
         
@@ -118,6 +125,8 @@ class IndexManager:
             也支持简写，如 'hs300', 'csi300' 等
         output_file: str, optional
             输出文件路径，如果指定则保存到文件
+        trade_date: str, optional
+            指定交易日期(YYYYMMDD格式)，如果不指定则使用最近交易日
         
         Returns
         -------
@@ -125,22 +134,27 @@ class IndexManager:
             股票代码列表，格式：['000001.SZ', '600000.SH', ...]
         """
         # 检查是否是简写代码
+        original_code = index_code
         if index_code.lower() in self.COMMON_INDICES:
             index_code = self.COMMON_INDICES[index_code.lower()]
-            logger.info(f"使用指数代码映射: {index_code}")
+            logger.info(f"使用指数代码映射: {original_code} -> {index_code}")
         
         logger.info(f"正在获取指数 {index_code} 的成分股列表...")
         
         df = None
         
         # 方法1: 尝试使用 index_weight 接口（需要日期）
-        trade_date = datetime.now().strftime('%Y%m%d')
-        logger.info(f"尝试使用 index_weight 接口，日期: {trade_date}")
+        if trade_date:
+            check_dates = [trade_date]
+        else:
+            # 尝试最近30个交易日（因为可能是非交易日）
+            check_dates = [(datetime.now() - timedelta(days=i)).strftime('%Y%m%d') 
+                          for i in range(0, 30)]
         
-        # 尝试最近30个交易日（因为可能是非交易日）
-        for i in range(0, 30):
+        logger.info(f"尝试使用 index_weight 接口...")
+        
+        for i, check_date in enumerate(check_dates):
             try:
-                check_date = (datetime.now() - timedelta(days=i)).strftime('%Y%m%d')
                 df = self.pro.index_weight(
                     index_code=index_code,
                     trade_date=check_date
@@ -150,7 +164,7 @@ class IndexManager:
                     break
             except Exception as e:
                 if i == 0:
-                    logger.warning(f"日期 {check_date} 获取失败: {e}")
+                    logger.debug(f"日期 {check_date} 获取失败: {e}")
                 continue
         
         # 方法2: 如果 index_weight 失败，尝试使用 index_cons 接口
@@ -159,7 +173,7 @@ class IndexManager:
                 logger.info("尝试使用 index_cons 接口...")
                 df = self.pro.index_cons(index_code=index_code)
                 if df is not None and not df.empty:
-                    logger.info("使用 index_cons 接口成功获取成分股")
+                    logger.info(f"使用 index_cons 接口成功获取成分股，共 {len(df)} 条")
             except Exception as e:
                 logger.warning(f"index_cons 接口也失败: {e}")
         
@@ -184,11 +198,77 @@ class IndexManager:
             output_path = Path(output_file)
             output_path.parent.mkdir(parents=True, exist_ok=True)
             with open(output_path, 'w', encoding='utf-8') as f:
+                # 添加文件头注释
+                f.write(f"# 指数成分股列表: {index_code} ({original_code})\n")
+                f.write(f"# 生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write(f"# 股票数量: {len(stock_list)}\n")
+                f.write("#\n")
                 for stock in stock_list:
                     f.write(f"{stock}\n")
             logger.info(f"股票列表已保存到: {output_path}")
         
         return stock_list
+    
+    def get_multiple_indices_constituents(self, index_codes: List[str], 
+                                         output_file: Optional[str] = None,
+                                         union: bool = True) -> List[str]:
+        """
+        获取多个指数的成分股列表
+        
+        Parameters
+        ----------
+        index_codes: List[str]
+            指数代码列表，如 ['000300.SH', '000905.SH']
+        output_file: str, optional
+            输出文件路径
+        union: bool, default True
+            True: 返回所有指数的并集
+            False: 返回所有指数的交集
+        
+        Returns
+        -------
+        List[str]
+            股票代码列表
+        """
+        logger.info(f"正在获取多个指数的成分股: {index_codes}")
+        logger.info(f"合并方式: {'并集' if union else '交集'}")
+        
+        all_stocks = []
+        for idx_code in index_codes:
+            try:
+                stocks = self.get_index_constituents(idx_code)
+                all_stocks.append(set(stocks))
+                logger.info(f"  {idx_code}: {len(stocks)} 只股票")
+            except Exception as e:
+                logger.error(f"获取指数 {idx_code} 失败: {e}")
+                continue
+        
+        if not all_stocks:
+            raise ValueError("未能获取任何指数的成分股数据")
+        
+        # 计算并集或交集
+        if union:
+            result_set = set().union(*all_stocks)
+        else:
+            result_set = set.intersection(*all_stocks)
+        
+        result_list = sorted(list(result_set))
+        logger.info(f"最终结果: {len(result_list)} 只股票")
+        
+        # 保存到文件
+        if output_file:
+            output_path = Path(output_file)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(output_path, 'w', encoding='utf-8') as f:
+                f.write(f"# 多指数成分股{'并集' if union else '交集'}: {', '.join(index_codes)}\n")
+                f.write(f"# 生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write(f"# 股票数量: {len(result_list)}\n")
+                f.write("#\n")
+                for stock in result_list:
+                    f.write(f"{stock}\n")
+            logger.info(f"股票列表已保存到: {output_path}")
+        
+        return result_list
     
     def interactive_select(self) -> Optional[str]:
         """

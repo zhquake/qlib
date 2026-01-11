@@ -312,16 +312,33 @@ class TushareCollector(BaseCollector):
             df['date'] = pd.to_datetime(df['date'], format='%Y%m%d')
             
             # 存储原始价格（未复权）+ 复权因子，提供最大灵活性
-            # 策略：
-            #   1. 存储原始价格（daily() API 返回的未复权价格）
-            #   2. 获取 Tushare 的 adj_factor（累积复权因子）
-            #   3. 计算前复权价格和后复权价格作为额外字段，方便查阅
-            #   4. factor 字段存储 Tushare 的 adj_factor（累积复权因子）
-            #
-            # 计算方式：
+            # 
+            # 【重要】Tushare adj_factor 的真实定义（经过充分验证）：
+            #   1. daily() API 返回的是未复权的原始价格
+            #   2. adj_factor 是一个绝对的复权系数（可以>100），包含了所有历史分红配股的累积影响
+            #   
+            # 【正确的计算方式】(经过实际数据验证):
             #   - 后复权价格 = 原始价格 × adj_factor
-            #   - 前复权价格 = 原始价格 × (adj_factor / adj_factor_latest)
-            #   - 其中 adj_factor_latest 是最近一个交易日的 adj_factor
+            #     说明：adj_factor本身就是绝对的复权系数
+            #     特点：后复权价格会远大于原始价格（如果有分红配股历史）
+            #     示例：close=9.21, adj_factor=116.713 → close_hfq=1074.93
+            #   
+            #   - 前复权价格 = 原始价格 × (当日adj_factor / 最新adj_factor)
+            #     说明：保持最新价格不变，历史价格会变小（如果有分红）
+            #     特点：最新日期的前复权价格 = 原始价格
+            #     示例：close=9.21, factor=116.713, latest=127.7841 → close_qfq=8.41
+            #   
+            # 【关键理解】:
+            #   - adj_factor不是0-1的比例，而是可以很大的绝对系数（如100+）
+            #   - 前复权和后复权的公式看起来相似，但分子分母位置不同！
+            #   - 前复权：current/latest（历史价格变小）
+            #   - 后复权：直接×factor（历史价格变大）
+            #   
+            # 【存储策略】:
+            #   - 原始价格字段: open, high, low, close（未复权）
+            #   - factor字段: 存储adj_factor（绝对复权系数）
+            #   - 前复权字段: open_qfq, high_qfq, low_qfq, close_qfq
+            #   - 后复权字段: open_hfq, high_hfq, low_hfq, close_hfq
             try:
                 # 获取 Tushare 的累积复权因子（adj_factor）
                 adj_factor_df = self.pro.adj_factor(
@@ -340,33 +357,39 @@ class TushareCollector(BaseCollector):
                     adj_factor_df['trade_date'] = pd.to_datetime(adj_factor_df['trade_date'], format='%Y%m%d')
                     adj_factor_df = adj_factor_df.rename(columns={'trade_date': 'date', 'adj_factor': 'factor'})
                     df = df.merge(adj_factor_df[['date', 'factor']], on='date', how='left')
-                    df['factor'] = df['factor'].fillna(1.0)
+                    df['factor'] = df['factor'].fillna(method='ffill').fillna(method='bfill').fillna(1.0)
                     
                     # 获取最新日期的 factor（用于计算前复权）
                     # 按日期排序，取最后一个非空的 factor
                     df_sorted = df.sort_values('date')
-                    factor_latest = df_sorted['factor'].iloc[-1] if not df_sorted.empty else 1.0
+                    factor_latest = df_sorted['factor'].dropna().iloc[-1] if not df_sorted.empty and not df_sorted['factor'].dropna().empty else 1.0
                     
-                    # 计算后复权价格（后复权 = 原始价格 × factor）
-                    df['close_hfq'] = df['close'] * df['factor']  # 后复权收盘价
-                    df['open_hfq'] = df['open'] * df['factor']   # 后复权开盘价
-                    df['high_hfq'] = df['high'] * df['factor']   # 后复权最高价
-                    df['low_hfq'] = df['low'] * df['factor']     # 后复权最低价
-                    
-                    # 计算前复权价格（前复权 = 原始价格 × (factor / factor_latest)）
-                    # 前复权保持最新价格不变，调整历史价格
                     if factor_latest > 0:
-                        factor_qfq = df['factor'] / factor_latest
-                        df['close_qfq'] = df['close'] * factor_qfq  # 前复权收盘价
-                        df['open_qfq'] = df['open'] * factor_qfq   # 前复权开盘价
-                        df['high_qfq'] = df['high'] * factor_qfq   # 前复权最高价
-                        df['low_qfq'] = df['low'] * factor_qfq     # 前复权最低价
+                        # 后复权价格 = 原始价格 × adj_factor
+                        # adj_factor本身就是绝对的复权系数
+                        df['close_hfq'] = df['close'] * df['factor']  # 后复权收盘价
+                        df['open_hfq'] = df['open'] * df['factor']   # 后复权开盘价
+                        df['high_hfq'] = df['high'] * df['factor']   # 后复权最高价
+                        df['low_hfq'] = df['low'] * df['factor']     # 后复权最低价
+                        
+                        # 前复权价格 = 原始价格 × (当日factor / 最新factor)
+                        # 保持最新价格不变，历史价格会变小（如果有分红）
+                        factor_qfq_ratio = df['factor'] / factor_latest
+                        df['close_qfq'] = df['close'] * factor_qfq_ratio  # 前复权收盘价
+                        df['open_qfq'] = df['open'] * factor_qfq_ratio   # 前复权开盘价
+                        df['high_qfq'] = df['high'] * factor_qfq_ratio   # 前复权最高价
+                        df['low_qfq'] = df['low'] * factor_qfq_ratio     # 前复权最低价
                     else:
-                        # 如果 factor_latest 为 0，使用原始价格
+                        # 如果 factor_latest 为 0 或负数，使用原始价格
+                        logger.warning(f"{ts_code}: factor_latest={factor_latest}，异常值，复权价格使用原始价格")
                         df['close_qfq'] = df['close']
                         df['open_qfq'] = df['open']
                         df['high_qfq'] = df['high']
                         df['low_qfq'] = df['low']
+                        df['close_hfq'] = df['close']
+                        df['open_hfq'] = df['open']
+                        df['high_hfq'] = df['high']
+                        df['low_hfq'] = df['low']
                 else:
                     # 如果无法获取复权因子，使用默认值
                     logger.warning(f"无法获取复权因子 {ts_code}，使用默认值1.0")
